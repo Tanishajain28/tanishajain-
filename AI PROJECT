@@ -1,0 +1,75 @@
+
+import tkinter as tk
+from tkinter import messagebox
+from tkinter import ttk
+
+def categorize_task(task):
+    """Categorizes tasks based on urgency using keyword matching."""
+    urgent_keywords = ["urgent", "important", "asap", "now", "immediate"]
+    medium_keywords = ["soon", "later", "next", "moderate"]
+    
+    task_lower = task.lower()
+    
+    if any(word in task_lower for word in urgent_keywords):
+        return "Urgent"
+    elif any(word in task_lower for word in medium_keywords):
+        return "Medium"
+    else:
+        return "Low"
+
+def add_task():
+    task = task_entry.get()
+    if task:
+        priority = categorize_task(task)
+        task_list.insert(tk.END, f"[{priority}] {task}")
+        task_entry.delete(0, tk.END)
+    else:
+        messagebox.showwarning("Warning", "Please enter a task!")
+
+def remove_task():
+    try:
+        selected_task = task_list.curselection()[0]
+        task_list.delete(selected_task)
+    except IndexError:
+        messagebox.showwarning("Warning", "Please select a task to remove!")
+
+# GUI Setup
+root = tk.Tk()
+root.title("AI-Powered To-Do List")
+root.geometry("450x550")
+root.configure(bg="#ADD8E6")
+
+# Styling
+style = ttk.Style()
+style.configure("TButton", font=("Arial", 12), padding=5)
+style.configure("TEntry", font=("Arial", 12))
+style.configure("TListbox", font=("Arial", 12))
+
+# Header Label
+header_label = tk.Label(root, text="AI-Powered To-Do List", font=("Arial", 18, "bold"), bg="#ADD8E6", fg="#333")
+header_label.pack(pady=10)
+
+# Task Entry
+task_entry = ttk.Entry(root, width=40)
+task_entry.pack(pady=10)
+
+# Add Button
+add_button = ttk.Button(root, text="Add Task", command=add_task)
+add_button.pack(pady=5)
+
+# Task Listbox (with Frame for better layout)
+task_frame = tk.Frame(root)
+task_frame.pack(pady=10)
+
+scrollbar = tk.Scrollbar(task_frame)
+task_list = tk.Listbox(task_frame, width=50, height=15, font=("Arial", 12), yscrollcommand=scrollbar.set, bg="#f0f8ff", fg="#000", selectbackground="#87ceeb")
+scrollbar.config(command=task_list.yview)
+
+scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+task_list.pack(side=tk.LEFT, fill=tk.BOTH)
+
+# Remove Button
+remove_button = ttk.Button(root, text="Remove Task", command=remove_task)
+remove_button.pack(pady=5)
+
+root.mainloop()
