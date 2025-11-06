@@ -1,0 +1,381 @@
+
+
+import os
+import threading
+import math
+import numpy as np
+import matplotlib.pyplot as plt
+import tkinter as tk
+from tkinter import ttk, messagebox
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from PIL import Image, ImageTk
+import tensorflow as tf
+from tensorflow.keras.preprocessing.image import ImageDataGenerator, load_img, img_to_array
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import (Conv2D, MaxPooling2D, Flatten, Dense, Dropout,
+                                     Reshape, SimpleRNN)
+from tensorflow.keras.optimizers import Adam
+from sklearn.metrics import confusion_matrix, classification_report
+import seaborn as sns
+
+# -----------------------------
+# Configuration (RAW path - Option 1)
+# -----------------------------
+ROOT = tk.Tk()
+ROOT.title("🧠 Brain MRI Multi-Class Classification")
+ROOT.geometry("1200x820")
+ROOT.configure(bg="#E8F5E9")  # light green
+
+# Use raw-string to avoid unicode path errors on Windows (Option 1)
+DATASET_DIR = r"C:\Users\jaint\Downloads\archive (17)\multi_class_dataset"
+
+IMG_SIZE = (128, 128)
+BATCH_SIZE = 8        # small for faster demo
+EPOCHS = 2            # quick training as requested
+
+train_gen = None
+val_gen = None
+trained_model = None
+image_refs = []       # keep PhotoImage refs alive
+detected_classes = []
+
+model_choice = tk.StringVar(value="CNN")
+
+# -----------------------------
+# Helper utilities
+# -----------------------------
+def dataset_exists():
+    return os.path.exists(DATASET_DIR) and os.path.isdir(DATASET_DIR)
+
+def get_class_folders():
+    if not dataset_exists():
+        return []
+    return [d for d in sorted(os.listdir(DATASET_DIR)) if os.path.isdir(os.path.join(DATASET_DIR, d))]
+
+def pick_first_n_images(n=3):
+    """
+    Deterministically pick up to n image file paths from dataset:
+    iterate classes in sorted order, take first image from each class until n reached.
+    """
+    imgs = []
+    classes = get_class_folders()
+    exts = ('.jpg', '.jpeg', '.png', '.bmp')
+    # first pass: take first image from each class
+    for cls in classes:
+        if len(imgs) >= n:
+            break
+        cls_path = os.path.join(DATASET_DIR, cls)
+        try:
+            for fname in sorted(os.listdir(cls_path)):
+                if fname.lower().endswith(exts):
+                    imgs.append((cls, os.path.join(cls_path, fname)))
+                    break
+        except Exception:
+            continue
+    # second pass: if still fewer than n, take additional images
+    if len(imgs) < n:
+        for cls in classes:
+            if len(imgs) >= n: break
+            cls_path = os.path.join(DATASET_DIR, cls)
+            try:
+                for fname in sorted(os.listdir(cls_path)):
+                    full = os.path.join(cls_path, fname)
+                    if any(full == p for (_, p) in imgs):
+                        continue
+                    if fname.lower().endswith(exts):
+                        imgs.append((cls, full))
+                        break
+            except Exception:
+                continue
+    return imgs[:n]
+
+# -----------------------------
+# Front Page UI
+# -----------------------------
+front = tk.Frame(ROOT, bg="#E8F5E9")
+front.place(relwidth=1, relheight=1)
+
+header = tk.Frame(front, bg="#e6f2ff", bd=0)
+header.place(relx=0.07, rely=0.06, relwidth=0.86, relheight=0.22)
+tk.Label(header, text="🧠 Brain MRI Disease Classification System",
+         font=("Times New Roman", 26, "bold"), bg="#e6f2ff", fg="#004c70").pack(pady=(18,2))
+tk.Label(header, text="Developed by Tanisha Jain | MCA (AI & ML), Chandigarh University",
+         font=("Times New Roman", 14), bg="#e6f2ff", fg="#075985").pack()
+
+about_card = tk.Frame(front, bg="white", bd=2, relief="groove")
+about_card.place(relx=0.07, rely=0.32, relwidth=0.86, relheight=0.38)
+tk.Label(about_card, text="About Project", font=("Times New Roman", 18, "bold"), bg="white", fg="#1B5E20").pack(anchor="w", padx=18, pady=(12,6))
+tk.Label(about_card,
+         text=("This application classifies brain MRI scans into multiple tumor classes "
+               "(glioma, meningioma, pituitary, and notumor). "
+               "Load the dataset, view real images (3 images from the dataset), choose a model (CNN/ANN/RNN), "
+               "and train quickly for demonstration (2 epochs)."),
+         font=("Times New Roman", 13), bg="white", wraplength=980, justify="left", fg="#2E7D32").pack(anchor="w", padx=18, pady=(0,14))
+
+start_btn = ttk.Button(front, text="▶ Start", command=lambda: show_frame(main_frame))
+start_btn.place(relx=0.43, rely=0.74, relwidth=0.14, relheight=0.08)
+
+# -----------------------------
+# Main Page UI
+# -----------------------------
+main_frame = tk.Frame(ROOT, bg="#E8F5E9")
+
+# top info card
+top_card = tk.Frame(main_frame, bg="white", bd=2, relief="ridge")
+top_card.place(relx=0.03, rely=0.02, relwidth=0.94, relheight=0.18)
+tk.Label(top_card, text="Brain MRI Multi-Class Classification",
+         font=("Times New Roman", 20, "bold"), bg="white", fg="#004c70").pack(anchor="w", padx=14, pady=(10,2))
+tk.Label(top_card, text="Dataset: " + DATASET_DIR, font=("Times New Roman", 11), bg="white", fg="#333333").pack(anchor="w", padx=14)
+
+# control card
+ctrl_card = tk.Frame(main_frame, bg="white", bd=2, relief="ridge")
+ctrl_card.place(relx=0.03, rely=0.22, relwidth=0.94, relheight=0.18)
+
+# Buttons & options
+load_btn = ttk.Button(ctrl_card, text="📦 Load Dataset (Detect Classes)", width=28)
+show_imgs_btn = ttk.Button(ctrl_card, text="🖼️ Show 3 Images (from dataset)", width=28)
+train_btn = ttk.Button(ctrl_card, text="🚀 Train (2 epochs)", width=20)
+exit_btn = ttk.Button(ctrl_card, text="❌ Exit", width=12, command=ROOT.destroy)
+
+load_btn.place(relx=0.02, rely=0.12)
+show_imgs_btn.place(relx=0.34, rely=0.12)
+train_btn.place(relx=0.66, rely=0.12)
+exit_btn.place(relx=0.86, rely=0.12)
+
+# model radio
+tk.Label(ctrl_card, text="Select Model:", font=("Times New Roman", 12), bg="white").place(relx=0.02, rely=0.62)
+ttk.Radiobutton(ctrl_card, text="CNN", variable=model_choice, value="CNN").place(relx=0.14, rely=0.62)
+ttk.Radiobutton(ctrl_card, text="ANN", variable=model_choice, value="ANN").place(relx=0.24, rely=0.62)
+ttk.Radiobutton(ctrl_card, text="RNN", variable=model_choice, value="RNN").place(relx=0.34, rely=0.62)
+
+status_label = tk.Label(main_frame, text="Status: Waiting to load dataset", bg="#E8F5E9", fg="#1B5E20", font=("Times New Roman", 12))
+status_label.place(relx=0.03, rely=0.42)
+
+# image display frame (3 images)
+images_card = tk.Frame(main_frame, bg="white", bd=2, relief="sunken")
+images_card.place(relx=0.03, rely=0.46, relwidth=0.94, relheight=0.36)
+
+img_frame_inner = tk.Frame(images_card, bg="white")
+img_frame_inner.pack(fill="both", expand=True, padx=10, pady=10)
+
+# placeholders for 3 images
+thumb_labels = []
+caption_labels = []
+for i in range(3):
+    frm = tk.Frame(img_frame_inner, bg="white", bd=1, relief="ridge")
+    frm.grid(row=0, column=i, padx=12, pady=6, ipadx=6, ipady=6)
+    lbl = tk.Label(frm, text="(no image)", bg="white")
+    lbl.pack()
+    cap = tk.Label(frm, text="", bg="white", font=("Times New Roman", 10))
+    cap.pack()
+    thumb_labels.append(lbl)
+    caption_labels.append(cap)
+
+# -----------------------------
+# Core logic functions
+# -----------------------------
+def show_frame(frame):
+    front.place_forget()
+    frame.place(relwidth=1, relheight=1)
+
+def reset_thumbs():
+    global image_refs
+    image_refs = []
+    for lbl, cap in zip(thumb_labels, caption_labels):
+        lbl.config(image="", text="(no image)")
+        cap.config(text="")
+
+def load_dataset_action():
+    global train_gen, val_gen, detected_classes
+    reset_thumbs()
+    status_label.config(text="Status: Loading dataset...", fg="#e67e22")
+    if not dataset_exists():
+        status_label.config(text="Status: Dataset folder not found", fg="red")
+        messagebox.showerror("Dataset not found", f"Dataset folder not found:\n{DATASET_DIR}")
+        return
+    try:
+        datagen = ImageDataGenerator(rescale=1.0/255.0, validation_split=0.2)
+
+        train_gen = datagen.flow_from_directory(
+            DATASET_DIR,
+            target_size=IMG_SIZE,
+            batch_size=BATCH_SIZE,
+            class_mode="categorical",
+            subset="training",
+            shuffle=True
+        )
+        val_gen = datagen.flow_from_directory(
+            DATASET_DIR,
+            target_size=IMG_SIZE,
+            batch_size=BATCH_SIZE,
+            class_mode="categorical",
+            subset="validation",
+            shuffle=False
+        )
+        detected_classes = list(train_gen.class_indices.keys())
+        status_label.config(text=f"Status: Dataset loaded. Classes: {detected_classes}", fg="#1B5E20")
+        messagebox.showinfo("Loaded", f"Dataset loaded successfully.\nClasses: {detected_classes}")
+        # show 3 dataset images immediately
+        show_dataset_images()
+    except Exception as e:
+        status_label.config(text="Status: Failed loading dataset", fg="red")
+        messagebox.showerror("Load Error", f"Failed to load dataset:\n{e}")
+
+def show_dataset_images():
+    """
+    Show 3 actual images from dataset (deterministic selection).
+    """
+    reset_thumbs()
+    imgs = pick_first_n_images(3)
+    if not imgs:
+        messagebox.showwarning("No images", "No images found in the dataset folders.")
+        return
+    for idx, (cls, path) in enumerate(imgs):
+        try:
+            pil = Image.open(path).convert("RGB").resize((320, 320))
+            photo = ImageTk.PhotoImage(pil)
+            image_refs.append(photo)
+            thumb_labels[idx].config(image=photo, text="")
+            caption_labels[idx].config(text=f"{cls} / {os.path.basename(path)}")
+        except Exception as e:
+            thumb_labels[idx].config(text="(error)")
+            caption_labels[idx].config(text=str(e))
+
+def build_model():
+    if train_gen is None:
+        raise RuntimeError("Load dataset first.")
+    num_classes = train_gen.num_classes
+    choice = model_choice.get()
+    model = Sequential()
+    if choice == "CNN":
+        model.add(Conv2D(32, (3,3), activation="relu", padding="same", input_shape=(*IMG_SIZE,3)))
+        model.add(MaxPooling2D((2,2)))
+        model.add(Conv2D(64, (3,3), activation="relu", padding="same"))
+        model.add(MaxPooling2D((2,2)))
+        model.add(Flatten())
+        model.add(Dense(128, activation="relu"))
+        model.add(Dropout(0.3))
+    elif choice == "ANN":
+        model.add(Flatten(input_shape=(*IMG_SIZE,3)))
+        model.add(Dense(512, activation="relu"))
+        model.add(Dropout(0.4))
+        model.add(Dense(256, activation="relu"))
+        model.add(Dropout(0.3))
+    elif choice == "RNN":
+        model.add(Reshape((IMG_SIZE[0], IMG_SIZE[1]*3), input_shape=(*IMG_SIZE,3)))
+        model.add(SimpleRNN(128))
+        model.add(Dropout(0.3))
+        model.add(Dense(128, activation="relu"))
+    else:
+        raise ValueError("Unknown model")
+    model.add(Dense(num_classes, activation="softmax"))
+    model.compile(optimizer=Adam(), loss="categorical_crossentropy", metrics=["accuracy"])
+    return model
+
+def start_training():
+    if train_gen is None:
+        messagebox.showerror("Not loaded", "Please load dataset first.")
+        return
+    # disable UI while training
+    load_btn.config(state="disabled")
+    show_imgs_btn.config(state="disabled")
+    train_btn.config(state="disabled")
+    status_label.config(text=f"Status: Training {model_choice.get()} (2 epochs)...", fg="#e67e22")
+    threading.Thread(target=training_task, daemon=True).start()
+
+def training_task():
+    global trained_model
+    try:
+        model = build_model()
+        steps = max(1, train_gen.samples // BATCH_SIZE)
+        val_steps = max(1, val_gen.samples // BATCH_SIZE)
+        history = model.fit(train_gen, steps_per_epoch=steps, validation_data=val_gen,
+                            validation_steps=val_steps, epochs=EPOCHS, verbose=1)
+        # predictions on validation set
+        val_gen.reset()
+        total_val_steps = int(math.ceil(val_gen.samples / BATCH_SIZE))
+        preds = model.predict(val_gen, steps=total_val_steps, verbose=0)
+        y_pred = np.argmax(preds, axis=1)
+        y_true = val_gen.classes[:len(y_pred)]
+        cm = confusion_matrix(y_true, y_pred)
+        report = classification_report(y_true, y_pred, target_names=list(val_gen.class_indices.keys()))
+        print("Classification Report:\n", report)
+        trained_model = model
+        ROOT.after(0, lambda: post_training(history, cm, report, model))
+    except Exception as e:
+        ROOT.after(0, lambda: training_failed(e))
+
+def post_training(history, cm, report, model):
+    load_btn.config(state="normal")
+    show_imgs_btn.config(state="normal")
+    train_btn.config(state="normal")
+    status_label.config(text="Status: Training complete ✔", fg="#1B5E20")
+    messagebox.showinfo("Done", "Training finished. Classification report printed to console.")
+    # accuracy/loss
+    fig, ax = plt.subplots(1,2, figsize=(10,4))
+    ax[0].plot(history.history.get("accuracy", []), marker="o", label="train_acc")
+    ax[0].plot(history.history.get("val_accuracy", []), marker="o", label="val_acc")
+    ax[0].set_title("Accuracy")
+    ax[0].legend()
+    ax[1].plot(history.history.get("loss", []), marker="o", label="train_loss")
+    ax[1].plot(history.history.get("val_loss", []), marker="o", label="val_loss")
+    ax[1].set_title("Loss")
+    ax[1].legend()
+    plt.tight_layout()
+    _show_plot(fig, "Accuracy & Loss")
+    # confusion matrix
+    fig2, ax2 = plt.subplots(figsize=(6,5))
+    sns.heatmap(cm, annot=True, fmt="d", xticklabels=list(val_gen.class_indices.keys()),
+                yticklabels=list(val_gen.class_indices.keys()), cmap="Greens", ax=ax2)
+    ax2.set_title("Confusion Matrix")
+    plt.tight_layout()
+    _show_plot(fig2, "Confusion Matrix")
+    # show dataset images again with predictions
+    display_images_with_predictions(model)
+
+def training_failed(err):
+    load_btn.config(state="normal")
+    show_imgs_btn.config(state="normal")
+    train_btn.config(state="normal")
+    status_label.config(text="Status: Training failed", fg="red")
+    messagebox.showerror("Training Error", str(err))
+
+def _show_plot(fig, title="Plot"):
+    w = tk.Toplevel(ROOT)
+    w.title(title)
+    canvas = FigureCanvasTkAgg(fig, master=w)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill="both", expand=True)
+
+def display_images_with_predictions(model):
+    """
+    Reuse the same deterministic 3 images and show predicted label & confidence
+    """
+    imgs = pick_first_n_images(3)
+    if not imgs:
+        return
+    for idx, (true_cls, path) in enumerate(imgs):
+        try:
+            arr = img_to_array(load_img(path, target_size=IMG_SIZE)) / 255.0
+            x = np.expand_dims(arr, axis=0)
+            if model_choice.get() == "RNN":
+                x = x.reshape((1, IMG_SIZE[0], IMG_SIZE[1]*3))
+            preds = model.predict(x, verbose=0)[0]
+            pred_idx = int(np.argmax(preds))
+            class_names = list(val_gen.class_indices.keys())
+            pred_label = class_names[pred_idx]
+            conf = preds[pred_idx]
+            caption_labels[idx].config(text=f"True: {true_cls} | Pred: {pred_label} ({conf:.2f})")
+        except Exception:
+            caption_labels[idx].config(text=f"Prediction error")
+
+# bind buttons
+load_btn.config(command=load_dataset_action)
+show_imgs_btn.config(command=show_dataset_images)
+train_btn.config(command=start_training)
+
+# main frame starts hidden; front page visible
+main_frame.place_forget()
+
+# run GUI
+ROOT.mainloop()
