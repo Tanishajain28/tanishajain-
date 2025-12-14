@@ -1,0 +1,157 @@
+import pytest
+from unittest.mock import Mock
+
+# Assume these are imported from the files we previously discussed
+from sweet_shop.backend.models import UserCreate, UserInDB
+from sweet_shop.backend.services.auth_service import UserService, AuthException
+from sweet_shop.backend.security import verify_password
+
+# --------------------------------------------------
+# Pytest Fixtures for Mocking Dependencies
+# --------------------------------------------------
+
+@pytest.fixture
+def mock_db_service():
+    """Fixture to create a mock database session/service."""
+    # Mock object simulates DB access without a real database
+    return Mock()
+
+
+@pytest.fixture
+def auth_service(mock_db_service):
+    """Fixture to instantiate the UserService with mocked DB dependency."""
+    return UserService(db_dependency=mock_db_service)
+
+
+# --------------------------------------------------
+# RED PHASE: TESTS FOR REGISTRATION (POST /api/auth/register)
+# --------------------------------------------------
+
+def test_register_user_success(auth_service, mock_db_service):
+    """TC 1.1: Should successfully register a new user and hash the password."""
+
+    # Arrange
+    mock_db_service.get_user_by_email.return_value = None
+
+    user_data = UserCreate(
+        email="test@user.com",
+        username="tester",
+        password="securepassword123",
+    )
+
+    # Act
+    new_user = auth_service.register_user(user_data)
+
+    # Assert
+    mock_db_service.create_user.assert_called_once()
+
+    assert new_user.email == user_data.email
+    assert new_user.role == "customer"  # default role
+
+    # Check hashed password (indirectly)
+    saved_user_data = mock_db_service.create_user.call_args[0][0]
+    assert saved_user_data["hashed_password"] != user_data.password
+    assert verify_password(
+        user_data.password, saved_user_data["hashed_password"]
+    ) is True
+
+
+def test_register_user_duplicate_email_fails(auth_service, mock_db_service):
+    """TC 1.2: Should raise AuthException if email already exists."""
+
+    # Arrange
+    existing_user = UserInDB(
+        id=1,
+        email="duplicate@mail.com",
+        username="dup",
+        role="customer",
+    )
+    mock_db_service.get_user_by_email.return_value = existing_user
+
+    user_data = UserCreate(
+        email="duplicate@mail.com",
+        username="new_user",
+        password="pass",
+    )
+
+    # Act & Assert
+    with pytest.raises(AuthException) as excinfo:
+        auth_service.register_user(user_data)
+
+    assert "Email already registered" in str(excinfo.value)
+    mock_db_service.create_user.assert_not_called()
+
+
+# --------------------------------------------------
+# RED PHASE: TESTS FOR LOGIN (POST /api/auth/login)
+# --------------------------------------------------
+
+def test_authenticate_user_success(auth_service, mock_db_service):
+    """TC 2.1: Should return the user object upon successful login."""
+
+    # Arrange
+    mock_user = UserInDB(
+        id=10,
+        email="admin@shop.com",
+        username="admin",
+        role="admin",
+    )
+    mock_db_service.get_user_by_email.return_value = mock_user
+
+    # Mock password verification
+    auth_service.verify_password = Mock(return_value=True)
+
+    # Act
+    authenticated_user = auth_service.authenticate_user(
+        email="admin@shop.com",
+        password="correct_password",
+    )
+
+    # Assert
+    assert authenticated_user == mock_user
+    auth_service.verify_password.assert_called_once()
+
+
+def test_authenticate_user_bad_password_fails(auth_service, mock_db_service):
+    """TC 2.2: Should return None for incorrect password."""
+
+    # Arrange
+    mock_user = UserInDB(
+        id=11,
+        email="user@shop.com",
+        username="user",
+        role="customer",
+    )
+    mock_db_service.get_user_by_email.return_value = mock_user
+
+    auth_service.verify_password = Mock(return_value=False)
+
+    # Act
+    authenticated_user = auth_service.authenticate_user(
+        email="user@shop.com",
+        password="wrong_password",
+    )
+
+    # Assert
+    assert authenticated_user is None
+
+
+def test_authenticate_user_not_found_fails(auth_service, mock_db_service):
+    """TC 2.3: Should return None if the user email is not found."""
+
+    # Arrange
+    mock_db_service.get_user_by_email.return_value = None
+
+    # Act
+    authenticated_user = auth_service.authenticate_user(
+        email="unknown@shop.com",
+        password="any_password",
+    )
+
+    # Assert
+    assert authenticated_user is None
+
+    # No password verification should occur if user does not exist
+    assert not hasattr(auth_service, "verify_password") or not getattr(
+        auth_service.verify_password, "called", False
+    )
